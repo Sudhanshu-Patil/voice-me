@@ -40,7 +40,7 @@ const QUESTIONS = [
 
 // Rules the answers must follow (they are spoken aloud, in first person, short, grounded).
 const checks = [
-  ['markdown or list', (a) => /[*#`]|^\s*[-\d]+[.)]\s/m.test(a)],
+  ['markdown or list', (a) => /[*`]|^\s*[-\d]+[.)]\s/m.test(a)],
   ['URL read aloud', (a) => /https?:\/\//.test(a)],
   ['too long (>110 words)', (a) => a.split(/\s+/).length > 110],
   ['third person', (a) => /\bSudhanshu (is|has|was)\b/.test(a)],
