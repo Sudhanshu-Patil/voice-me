@@ -8,7 +8,7 @@ const QUESTIONS = [
   'How do you push your boundaries and limits?',
 ]
 const history = []
-let recorder, stream, chunks = [], timer, audio, busy = false, gen = 0
+let recorder, stream, chunks = [], timer, audio, busy = false, gen = 0, spoke = true
 
 const say = (t) => (status.textContent = t)
 function add(who, text) {
@@ -36,12 +36,13 @@ async function post(path, body) {
 }
 
 // Play one sentence: Groq voice, or the browser's own voice if Groq TTS fails, so the bot always talks.
-async function playPart(p, text, my) {
+async function playPart(p, text, my, onStart) {
   if (my !== gen) return
   let blob
   try {
     blob = await p
   } catch {
+    onStart()
     if (my !== gen || !('speechSynthesis' in window)) return
     return new Promise((res) => {
       const u = new SpeechSynthesisUtterance(text)
@@ -51,6 +52,7 @@ async function playPart(p, text, my) {
   }
   if (my !== gen) return
   audio = new Audio(URL.createObjectURL(blob))
+  onStart()
   await audio.play().catch(() => {})
   await new Promise((res) => ((audio.onended = res), (audio.onerror = res), (audio.onpause = res)))
 }
@@ -69,11 +71,19 @@ async function ask(question) {
     mic.disabled = false
     const reader = r.body.getReader()
     const dec = new TextDecoder()
-    let bubble, pending = '', chain = Promise.resolve()
+    let bubble, pending = '', chain = Promise.resolve(), queued = 0, visible = false
+    const paint = () => {
+      if (!visible || !full.trim()) return
+      if (!bubble) (add('bot', ''), (bubble = log.lastChild.lastChild))
+      bubble.textContent = full
+    }
+    // Text appears when the voice starts, so what you read and what you hear stay in step.
+    const onStart = () => ((visible = true), say('Speaking… tap the mic to interrupt'), paint())
     const queue = (text) => {
+      queued++
       const p = post('tts', { text }).then((x) => x.blob())
       p.catch(() => {}) // failures are handled when this sentence's turn comes
-      chain = chain.then(() => playPart(p, text, my))
+      chain = chain.then(() => playPart(p, text, my, onStart))
     }
     for (;;) {
       const { done, value } = await reader.read()
@@ -81,14 +91,18 @@ async function ask(question) {
       const t = done ? '' : dec.decode(value, { stream: true })
       full += t
       pending += t
-      if (full.trim() && !bubble) (add('bot', ''), (bubble = log.lastChild.lastChild))
-      if (bubble) bubble.textContent = full
+      paint()
       if (!done) {
-        say('Speaking… tap the mic to interrupt')
         // emit each finished sentence (period + whitespace, so "0.5" is not split) once it is long enough
         for (let m; (m = pending.match(/^[\s\S]*?[.!?]\s+/)) && m[0].trim().length >= 20; ) {
           queue(m[0].trim())
           pending = pending.slice(m[0].length)
+        }
+        // Start the voice sooner: the first chunk may end at a comma/semicolon, or at a word break once long enough.
+        const early = !queued && (pending.match(/^[\s\S]{25,}?[,;:]\s+/) || pending.match(/^[\s\S]{60,}?\s/))
+        if (early) {
+          queue(early[0].trim())
+          pending = pending.slice(early[0].length)
         }
       } else {
         if (pending.trim()) queue(pending.trim())
@@ -109,11 +123,39 @@ async function ask(question) {
   }
 }
 
+// Ends the recording on its own: after you have spoken, ~1.3s of quiet means the question is over.
+// shortcut: simple volume threshold (no real VAD model), so loud background noise can keep it open; tapping the mic always sends.
+function autoStop(ctx, src) {
+  const an = ctx.createAnalyser()
+  an.fftSize = 1024
+  src.connect(an)
+  const buf = new Uint8Array(an.fftSize)
+  const t0 = Date.now()
+  let floor = 0, n = 0, heard = false, lastVoice = 0
+  spoke = false
+  const iv = setInterval(() => {
+    if (recorder?.state !== 'recording') return clearInterval(iv)
+    an.getByteTimeDomainData(buf)
+    let sum = 0
+    for (const v of buf) sum += ((v - 128) / 128) ** 2
+    const rms = Math.sqrt(sum / buf.length)
+    const now = Date.now()
+    if (now - t0 < 400) return (floor += rms), n++ // first 0.4s measures the room's background level
+    const level = Math.max(0.02, (floor / n) * 2.5)
+    if (rms > level) (heard = spoke = true), (lastVoice = now)
+    if (heard && now - lastVoice > 1300) (clearInterval(iv), recorder.stop())
+    else if (!heard && now - t0 > 9000) (clearInterval(iv), recorder.stop()) // nobody spoke
+  }, 60)
+}
+
 async function start() {
   stopSpeaking()
+  const ctx = window.AudioContext || window.webkitAudioContext ? new (window.AudioContext || window.webkitAudioContext)() : null
+  ctx?.resume() // Safari only allows this inside the tap
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true })
   } catch {
+    ctx?.close()
     say('Microphone blocked. Allow it in the browser, or type your question below.')
     return
   }
@@ -121,14 +163,16 @@ async function start() {
   recorder = new MediaRecorder(stream)
   recorder.ondataavailable = (e) => chunks.push(e.data)
   recorder.onstop = async () => {
+    clearTimeout(timer)
+    ctx?.close()
     stream.getTracks().forEach((t) => t.stop())
     mic.classList.remove('rec')
     mic.setAttribute('aria-label', 'Start recording')
     const blob = new Blob(chunks, { type: recorder.mimeType })
-    if (blob.size < 2000) return say("I didn't catch that. Tap the mic and try again.")
+    if (blob.size < 2000 || !spoke) return say("I didn't catch that. Tap the mic and try again.")
     busy = true
     mic.disabled = true
-    say('Listening…')
+    say('Got it, transcribing…')
     try {
       const form = new FormData()
       form.set('audio', blob, 'speech.' + (blob.type.includes('mp4') ? 'mp4' : 'webm'))
@@ -143,9 +187,10 @@ async function start() {
     }
   }
   recorder.start()
+  if (ctx) autoStop(ctx, ctx.createMediaStreamSource(stream))
   mic.classList.add('rec')
   mic.setAttribute('aria-label', 'Stop recording and send')
-  say('Recording… tap again to send')
+  say('Listening… just stop talking when you are done')
   timer = setTimeout(() => recorder.state === 'recording' && recorder.stop(), 30000)
 }
 
@@ -173,3 +218,6 @@ for (const q of QUESTIONS) {
   b.onclick = () => !busy && (stopSpeaking(), ask(q))
   $('chips').append(b)
 }
+
+// Warm up the TTS function and Groq once, so the first real sentence is not slowed by a cold start.
+fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Hi.' }) }).catch(() => {})
