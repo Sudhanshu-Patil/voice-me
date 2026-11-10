@@ -35,46 +35,24 @@ async function post(path, body) {
   return r
 }
 
-// Split into a short first chunk (so audio starts fast) and larger chunks after it; all are fetched in parallel.
-function chunk(text) {
-  const out = []
-  for (const x of text.match(/[^.!?]+[.!?]*\s*/g) || [text]) {
-    if (out.length && out.length > 1 && out.at(-1).length + x.length < 250) out[out.length - 1] += x
-    else out.push(x)
+// Play one sentence: Groq voice, or the browser's own voice if Groq TTS fails, so the bot always talks.
+async function playPart(p, text, my) {
+  if (my !== gen) return
+  let blob
+  try {
+    blob = await p
+  } catch {
+    if (my !== gen || !('speechSynthesis' in window)) return
+    return new Promise((res) => {
+      const u = new SpeechSynthesisUtterance(text)
+      u.onend = u.onerror = res
+      speechSynthesis.speak(u)
+    })
   }
-  return out
-}
-
-async function speak(text, onStart) {
-  const my = ++gen
-  const parts = chunk(text)
-  const blobs = parts.map((t) => post('tts', { text: t }).then((r) => r.blob()))
-  blobs.forEach((p) => p.catch(() => {})) // errors are handled when each chunk is awaited
-  let started = false
-  for (let i = 0; i < parts.length; i++) {
-    if (my !== gen) return
-    let blob
-    try {
-      blob = await blobs[i]
-    } catch {
-      // Groq TTS unavailable: the browser's own voice reads the rest so the bot still talks.
-      if (!started) onStart?.()
-      if (my !== gen || !('speechSynthesis' in window)) return
-      say('Speaking… tap the mic to interrupt')
-      await new Promise((res) => {
-        const u = new SpeechSynthesisUtterance(parts.slice(i).join(' '))
-        u.onend = u.onerror = res
-        speechSynthesis.speak(u)
-      })
-      return
-    }
-    if (my !== gen) return
-    audio = new Audio(URL.createObjectURL(blob))
-    if (!started) (started = true), onStart?.()
-    say('Speaking… tap the mic to interrupt')
-    await audio.play().catch(() => {})
-    await new Promise((res) => ((audio.onended = res), (audio.onerror = res), (audio.onpause = res)))
-  }
+  if (my !== gen) return
+  audio = new Audio(URL.createObjectURL(blob))
+  await audio.play().catch(() => {})
+  await new Promise((res) => ((audio.onended = res), (audio.onerror = res), (audio.onpause = res)))
 }
 
 async function ask(question) {
@@ -82,21 +60,48 @@ async function ask(question) {
   mic.disabled = true
   add('you', question)
   history.push({ role: 'user', content: question })
+  const my = ++gen
+  let full = ''
   try {
     say('Thinking…')
-    const { reply } = await (await post('chat', { messages: history })).json()
-    if (!reply) throw new Error('I had no answer to that. Please try again.')
-    history.push({ role: 'assistant', content: reply })
-    busy = false // so the mic can interrupt the spoken answer
+    const r = await post('chat', { messages: history })
+    busy = false // from here the mic can interrupt
     mic.disabled = false
-    let shown = false
-    const show = () => shown || ((shown = true), add('bot', reply))
-    await speak(reply, show)
-    show()
-    if (recorder?.state !== 'recording') say('Tap the mic to ask another question')
+    const reader = r.body.getReader()
+    const dec = new TextDecoder()
+    let bubble, pending = '', chain = Promise.resolve()
+    const queue = (text) => {
+      const p = post('tts', { text }).then((x) => x.blob())
+      p.catch(() => {}) // failures are handled when this sentence's turn comes
+      chain = chain.then(() => playPart(p, text, my))
+    }
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (my !== gen) return reader.cancel()
+      const t = done ? '' : dec.decode(value, { stream: true })
+      full += t
+      pending += t
+      if (full.trim() && !bubble) (add('bot', ''), (bubble = log.lastChild.lastChild))
+      if (bubble) bubble.textContent = full
+      if (!done) {
+        say('Speaking… tap the mic to interrupt')
+        // emit each finished sentence (period + whitespace, so "0.5" is not split) once it is long enough
+        for (let m; (m = pending.match(/^[\s\S]*?[.!?]\s+/)) && m[0].trim().length >= 20; ) {
+          queue(m[0].trim())
+          pending = pending.slice(m[0].length)
+        }
+      } else {
+        if (pending.trim()) queue(pending.trim())
+        break
+      }
+    }
+    if (!full.trim()) throw new Error('I had no answer to that. Please try again.')
+    history.push({ role: 'assistant', content: full.trim() })
+    await chain
+    if (my === gen && recorder?.state !== 'recording') say('Tap the mic to ask another question')
   } catch (e) {
-    history.pop()
-    add('bot', e.message)
+    if (!full.trim()) history.pop()
+    add('bot', full.trim() ? 'Sorry, I lost my connection mid-answer.' : e.message)
     say('Tap the mic to try again')
   } finally {
     busy = false

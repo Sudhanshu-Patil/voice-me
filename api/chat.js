@@ -30,6 +30,7 @@ export async function POST(req) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
+        stream: true,
         temperature: 0.5,
         reasoning_effort: 'low',
         max_tokens: 700, // includes hidden reasoning tokens
@@ -39,6 +40,28 @@ export async function POST(req) {
     if (r?.status !== 429) break
   }
   if (!r?.ok) return err('llm_failed', 502)
-  const data = await r.json()
-  return Response.json({ reply: (data.choices?.[0]?.message?.content || '').trim() })
+  // Groq's SSE -> plain text deltas, so the page can start speaking before the answer is finished.
+  const dec = new TextDecoder(), enc = new TextEncoder()
+  const reader = r.body.getReader()
+  let buf = ''
+  const out = new ReadableStream({
+    async pull(c) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) return c.close()
+        buf += dec.decode(value, { stream: true })
+        const lines = buf.split(/\r?\n/)
+        buf = lines.pop()
+        for (const l of lines) {
+          if (!l.startsWith('data:') || l.includes('[DONE]')) continue
+          const t = JSON.parse(l.slice(5)).choices?.[0]?.delta?.content
+          if (t) c.enqueue(enc.encode(t))
+        }
+      } catch {
+        c.close()
+      }
+    },
+    cancel: () => reader.cancel(),
+  })
+  return new Response(out, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } })
 }
