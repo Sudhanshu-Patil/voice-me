@@ -45,21 +45,23 @@ export async function POST(req) {
   const reader = r.body.getReader()
   let buf = ''
   const out = new ReadableStream({
-    async pull(c) {
+    async start(c) {
       try {
-        const { done, value } = await reader.read()
-        if (done) return c.close()
-        buf += dec.decode(value, { stream: true })
-        const lines = buf.split(/\r?\n/)
-        buf = lines.pop()
-        for (const l of lines) {
-          if (!l.startsWith('data:') || l.includes('[DONE]')) continue
-          const t = JSON.parse(l.slice(5)).choices?.[0]?.delta?.content
-          if (t) c.enqueue(enc.encode(t))
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += dec.decode(value, { stream: true })
+          const lines = buf.split(/?
+/)
+          buf = lines.pop()
+          for (const l of lines) {
+            if (!l.startsWith('data:') || l.includes('[DONE]')) continue
+            const t = JSON.parse(l.slice(5)).choices?.[0]?.delta?.content
+            if (t) c.enqueue(enc.encode(t))
+          }
         }
-      } catch {
-        c.close()
-      }
+      } catch {}
+      c.close()
     },
     cancel: () => reader.cancel(),
   })
