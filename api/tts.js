@@ -17,6 +17,9 @@ export async function POST(req) {
       response_format: 'wav',
     }),
   }).catch(() => null)
-  if (!r?.ok) return err('tts_failed', 502)
+  if (!r?.ok) {
+    console.error('groq tts', r?.status, await r?.text().catch(() => ''))
+    return err('tts_failed', 502)
+  }
   return new Response(r.body, { headers: { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store' } })
 }
