@@ -8,7 +8,7 @@ const QUESTIONS = [
   'How do you push your boundaries and limits?',
 ]
 const history = []
-let recorder, stream, chunks = [], timer, audio, busy = false
+let recorder, stream, chunks = [], timer, audio, busy = false, gen = 0
 
 const say = (t) => (status.textContent = t)
 function add(who, text) {
@@ -22,6 +22,7 @@ function add(who, text) {
 }
 
 function stopSpeaking() {
+  gen++
   audio?.pause()
   speechSynthesis?.cancel()
   audio = null
@@ -34,22 +35,45 @@ async function post(path, body) {
   return r
 }
 
-async function speak(text) {
-  try {
-    const r = await post('tts', { text })
-    audio = new Audio(URL.createObjectURL(await r.blob()))
+// Split into a short first chunk (so audio starts fast) and larger chunks after it; all are fetched in parallel.
+function chunk(text) {
+  const out = []
+  for (const x of text.match(/[^.!?]+[.!?]*\s*/g) || [text]) {
+    if (out.length && out.length > 1 && out.at(-1).length + x.length < 250) out[out.length - 1] += x
+    else out.push(x)
+  }
+  return out
+}
+
+async function speak(text, onStart) {
+  const my = ++gen
+  const parts = chunk(text)
+  const blobs = parts.map((t) => post('tts', { text: t }).then((r) => r.blob()))
+  blobs.forEach((p) => p.catch(() => {})) // errors are handled when each chunk is awaited
+  let started = false
+  for (let i = 0; i < parts.length; i++) {
+    if (my !== gen) return
+    let blob
+    try {
+      blob = await blobs[i]
+    } catch {
+      // Groq TTS unavailable: the browser's own voice reads the rest so the bot still talks.
+      if (!started) onStart?.()
+      if (my !== gen || !('speechSynthesis' in window)) return
+      say('Speaking… tap the mic to interrupt')
+      await new Promise((res) => {
+        const u = new SpeechSynthesisUtterance(parts.slice(i).join(' '))
+        u.onend = u.onerror = res
+        speechSynthesis.speak(u)
+      })
+      return
+    }
+    if (my !== gen) return
+    audio = new Audio(URL.createObjectURL(blob))
+    if (!started) (started = true), onStart?.()
     say('Speaking… tap the mic to interrupt')
-    await audio.play()
+    await audio.play().catch(() => {})
     await new Promise((res) => ((audio.onended = res), (audio.onerror = res), (audio.onpause = res)))
-  } catch {
-    // Groq TTS unavailable: use the browser's own voice so the bot still talks.
-    if (!('speechSynthesis' in window)) return
-    say('Speaking… tap the mic to interrupt')
-    await new Promise((res) => {
-      const u = new SpeechSynthesisUtterance(text)
-      u.onend = u.onerror = res
-      speechSynthesis.speak(u)
-    })
   }
 }
 
@@ -63,10 +87,12 @@ async function ask(question) {
     const { reply } = await (await post('chat', { messages: history })).json()
     if (!reply) throw new Error('I had no answer to that. Please try again.')
     history.push({ role: 'assistant', content: reply })
-    add('bot', reply)
-    mic.disabled = false
     busy = false // so the mic can interrupt the spoken answer
-    await speak(reply)
+    mic.disabled = false
+    let shown = false
+    const show = () => shown || ((shown = true), add('bot', reply))
+    await speak(reply, show)
+    show()
     if (recorder?.state !== 'recording') say('Tap the mic to ask another question')
   } catch (e) {
     history.pop()

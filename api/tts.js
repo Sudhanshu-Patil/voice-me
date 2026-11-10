@@ -3,7 +3,7 @@ import { groq, limited, err } from './_lib.js'
 // Groq's TTS model may need one-time terms acceptance in console.groq.com; on any failure the page falls back to the browser voice.
 export async function POST(req) {
   if (!process.env.GROQ_API_KEY) return err('offline', 503)
-  if (limited(req)) return err('rate_limited', 429)
+  if (limited(req, 150)) return err('rate_limited', 429)
   const body = await req.json().catch(() => null)
   const text = typeof body?.text === 'string' ? body.text.trim().slice(0, 1000) : ''
   if (!text) return err('bad_request', 400)
