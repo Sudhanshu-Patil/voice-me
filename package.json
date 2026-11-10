@@ -1,0 +1,6 @@
+{
+  "name": "voice-me",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" }
+}
