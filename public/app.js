@@ -129,8 +129,8 @@ function autoStop(ctx, src) {
   src.connect(an)
   const buf = new Uint8Array(an.fftSize)
   const t0 = Date.now()
-  let floor = 0, n = 0, heard = false, lastVoice = 0
-  spoke = false
+  let floor = 0, n = 0, heard = false, lastVoice = 0, voiced = 0
+  spoke = false // becomes true only after ~0.5s of voice, so a click or cough is not sent as a question
   const iv = setInterval(() => {
     if (recorder?.state !== 'recording') return clearInterval(iv)
     an.getByteTimeDomainData(buf)
@@ -140,7 +140,7 @@ function autoStop(ctx, src) {
     const now = Date.now()
     if (now - t0 < 400) return (floor += rms), n++ // first 0.4s measures the room's background level
     const level = Math.max(0.02, (floor / n) * 2.5)
-    if (rms > level) (heard = spoke = true), (lastVoice = now)
+    if (rms > level) (heard = true), (lastVoice = now), (spoke = ++voiced >= 8)
     if (heard && now - lastVoice > 1300) (clearInterval(iv), recorder.stop())
     else if (!heard && now - t0 > 9000) (clearInterval(iv), recorder.stop()) // nobody spoke
   }, 60)
