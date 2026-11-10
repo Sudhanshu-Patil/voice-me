@@ -1,0 +1,11 @@
+[project]
+name = "realtime-livekit"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "kokoro-onnx>=0.6.1",
+    "livekit-agents[silero,turn-detector]>=1.8.11",
+    "livekit-plugins-groq>=1.8.11",
+    "livekit-plugins-openai>=1.8.11",
+    "python-dotenv>=1.2.4",
+]
