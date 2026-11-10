@@ -8,7 +8,7 @@ const QUESTIONS = [
   'How do you push your boundaries and limits?',
 ]
 const history = []
-let recorder, stream, chunks = [], timer, audio, busy = false, gen = 0, spoke = true
+let recorder, stream, chunks = [], timer, busy = false, gen = 0, spoke = true
 
 const say = (t) => (status.textContent = t)
 function add(who, text) {
@@ -23,9 +23,7 @@ function add(who, text) {
 
 function stopSpeaking() {
   gen++
-  audio?.pause()
   speechSynthesis?.cancel()
-  audio = null
 }
 
 async function post(path, body) {
@@ -35,26 +33,28 @@ async function post(path, body) {
   return r
 }
 
-// Play one sentence: Groq voice, or the browser's own voice if Groq TTS fails, so the bot always talks.
-async function playPart(p, text, my, onStart) {
-  if (my !== gen) return
-  let blob
-  try {
-    blob = await p
-  } catch {
-    onStart()
-    if (my !== gen || !('speechSynthesis' in window)) return
-    return new Promise((res) => {
-      const u = new SpeechSynthesisUtterance(text)
-      u.onend = u.onerror = res
-      speechSynthesis.speak(u)
-    })
-  }
-  if (my !== gen) return
-  audio = new Audio(URL.createObjectURL(blob))
-  onStart()
-  await audio.play().catch(() => {})
-  await new Promise((res) => ((audio.onended = res), (audio.onerror = res), (audio.onpause = res)))
+// The browser's own speech engine: free, no quota, starts instantly. Prefers a natural English voice
+// (Edge "Natural"/"Online" voices are very good; Indian English first), then Google, then any English one.
+// shortcut: quality depends on the visitor's device; swap in a hosted TTS (ElevenLabs, Edge TTS) if a nicer voice is needed.
+let voice
+function pickVoice() {
+  const vs = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang))
+  const rank = (v) => (/Natural|Online/i.test(v.name) ? 0 : /Google/i.test(v.name) ? 2 : 4) + (/en[-_]IN/i.test(v.lang) ? 0 : /en[-_]US/i.test(v.lang) ? 1 : 2)
+  voice = vs.sort((x, y) => rank(x) - rank(y))[0]
+}
+if ('speechSynthesis' in window) (pickVoice(), (speechSynthesis.onvoiceschanged = pickVoice))
+// iOS Safari only lets speech start from a tap, so each tap primes it with a silent utterance.
+const unlock = () => 'speechSynthesis' in window && speechSynthesis.speak(new SpeechSynthesisUtterance(''))
+
+function playPart(text, my, onStart) {
+  if (my !== gen || !('speechSynthesis' in window)) return onStart()
+  return new Promise((res) => {
+    const u = new SpeechSynthesisUtterance(text)
+    if (voice) (u.voice = voice), (u.lang = voice.lang)
+    u.onstart = onStart
+    u.onend = u.onerror = res
+    speechSynthesis.speak(u)
+  })
 }
 
 async function ask(question) {
@@ -81,9 +81,7 @@ async function ask(question) {
     const onStart = () => ((visible = true), say('Speaking… tap the mic to interrupt'), paint())
     const queue = (text) => {
       queued++
-      const p = post('tts', { text }).then((x) => x.blob())
-      p.catch(() => {}) // failures are handled when this sentence's turn comes
-      chain = chain.then(() => playPart(p, text, my, onStart))
+      chain = chain.then(() => playPart(text, my, onStart))
     }
     for (;;) {
       const { done, value } = await reader.read()
@@ -150,6 +148,7 @@ function autoStop(ctx, src) {
 
 async function start() {
   stopSpeaking()
+  unlock()
   const ctx = window.AudioContext || window.webkitAudioContext ? new (window.AudioContext || window.webkitAudioContext)() : null
   ctx?.resume() // Safari only allows this inside the tap
   try {
@@ -209,15 +208,13 @@ $('form').onsubmit = (e) => {
   if (!q || busy) return
   $('text').value = ''
   stopSpeaking()
+  unlock()
   ask(q)
 }
 
 for (const q of QUESTIONS) {
   const b = document.createElement('button')
   b.textContent = q
-  b.onclick = () => !busy && (stopSpeaking(), ask(q))
+  b.onclick = () => !busy && (stopSpeaking(), unlock(), ask(q))
   $('chips').append(b)
 }
-
-// Warm up the TTS function and Groq once, so the first real sentence is not slowed by a cold start.
-fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Hi.' }) }).catch(() => {})
