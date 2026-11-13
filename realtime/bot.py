@@ -92,9 +92,22 @@ def make_tts():
     )
 
 
+def make_stt():
+    """Local Whisper by default: free, offline, no quota. STT=groq switches back to Groq's hosted Whisper."""
+    if os.getenv("STT", "local") == "groq":
+        return GroqSTTService(api_key=os.environ["GROQ_API_KEY"])
+    from pipecat.services.whisper.stt import WhisperSTTService
+
+    return WhisperSTTService(
+        device=os.getenv("WHISPER_DEVICE", "cpu"),  # "cuda" for an NVIDIA GPU (needs cuDNN); "auto" picks for you
+        compute_type=os.getenv("WHISPER_COMPUTE", "int8"),
+        settings=WhisperSTTService.Settings(model=os.getenv("WHISPER_MODEL", "base")),  # tiny | base | small | medium
+    )
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    key = os.environ["GROQ_API_KEY"]
-    stt = GroqSTTService(api_key=key)
+    key = os.environ["GROQ_API_KEY"]  # still needed for the LLM
+    stt = make_stt()
     llm = GroqLLMService(api_key=key, settings=GroqLLMService.Settings(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), reasoning_effort="low"))
     tts = make_tts()
 
